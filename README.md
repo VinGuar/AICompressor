@@ -1,153 +1,84 @@
-# ⚡ ContextLite
+# ContextLite
 
-**Post-RAG context optimizer.** Takes the chunks your RAG system already retrieved and compresses them into the highest-signal context before the LLM call — removing noise, deduplicating repeated content, and fitting everything into your token budget.
+RAG retrieves chunks. The problem is it retrieves whole chunks — even if only 2 sentences in a chunk are relevant, all 10 go into your prompt. And if 3 different chunks say the same thing, all 3 go in. By the time it hits the LLM you're paying for a lot of noise.
 
-No LLM calls. Runs entirely locally. Single embedding pass.
-
----
-
-## The Problem
-
-RAG retrieves at the **chunk level**. That creates three problems:
-
-1. **Intra-chunk noise** — a chunk is included even if only 2 of its 10 sentences are relevant to the query. The other 8 waste tokens.
-2. **Cross-chunk redundancy** — if 3 chunks say the same thing in different words, all 3 go into the prompt. RAG retrieves chunks independently; it never compares them to each other.
-3. **No token budget awareness** — RAG doesn't know you have a 2,048 token limit. It retrieves what it retrieves.
-
-ContextLite sits in the gap between retrieval and the LLM call:
+ContextLite sits between your retrieval step and the LLM call. It takes the chunks you already retrieved, strips out the irrelevant sentences, removes duplicates across chunks, reranks for diversity, and packs everything into a token budget. No LLM calls — runs locally with a small embedding model.
 
 ```
-Your data → [RAG retrieval] → chunks → [ContextLite] → optimized context → LLM
+RAG chunks → ContextLite → clean context → LLM
 ```
 
----
-
-## How It Works
-
-Five steps, all local, one embedding pass:
-
-| Step | What it does | Why RAG doesn't |
-|---|---|---|
-| **1. Clean** | Strip HTML tags, markdown headers, nav text, copyright boilerplate | RAG doesn't parse noise |
-| **2. Score** | Embed every sentence + query in one batch; drop sentences below relevance threshold | RAG works at chunk level, not sentence level |
-| **3. Dedup** | Find near-identical sentences across chunks via cosine similarity; keep the best one | RAG retrieves chunks independently |
-| **4. MMR** | Rerank remaining sentences to balance relevance with topic diversity | RAG ranks by relevance only — you get clusters |
-| **5. Pack** | Greedily fill token budget with highest-ranked sentences; restore reading order | RAG doesn't know your budget |
-
-**Performance:** steps 3–4 reuse the embeddings computed in step 2, so there is exactly **one model call** per optimize run.
-
----
-
-## Quickstart
+## Getting started
 
 ```bash
 git clone https://github.com/VinGuar/AICompressor.git
 cd AICompressor
 pip install -r requirements.txt
-
-# UI (downloads ~80MB model on first run, cached after)
 python -m streamlit run app.py
 ```
 
-No API keys needed. First run downloads `all-MiniLM-L6-v2` (~80MB) and caches it locally.
+First run downloads the embedding model (~80MB, cached after). No API keys needed.
 
----
+## How to use it
 
-## Usage
+**UI** — `python -m streamlit run app.py`
 
-### UI
+Paste your chunks, enter your query, hit Optimize. Shows before/after token counts, what was kept vs removed, and a side-by-side comparison.
+
+**CLI**
 ```bash
-python -m streamlit run app.py
-```
-Opens at `http://localhost:8501`. Click **Load demo data** to try it immediately.
-
-The UI has three output tabs:
-- **Optimized context** — the result, ready to copy into a prompt
-- **Before / After** — side-by-side comparison with token counts
-- **What was removed** — colour-coded kept (green) vs removed (red) sentences
-
-### CLI
-```bash
-# Pass chunks directly
-python main.py --chunks "chunk one..." "chunk two..." --query "your question"
-
-# Load from file (blank line = chunk separator)
+python main.py --chunks "chunk one" "chunk two" --query "your question"
+python main.py --demo   # try with built-in example data
 python main.py --file chunks.txt --query "your question" --budget 1024
-
-# Built-in demo
-python main.py --demo
-
-# Raw JSON output
-python main.py --chunks "..." --query "..." --json-out
 ```
 
-### API
-```bash
-uvicorn api:app --reload
-# Docs at http://localhost:8000/docs
-```
-
+**API** — `uvicorn api:app --reload`, then `POST /optimize`
 ```json
-POST /optimize
 {
   "chunks": ["chunk one...", "chunk two..."],
   "query": "What are the pricing plans?",
-  "token_budget": 512,
-  "relevance_threshold": 0.25,
-  "dedup_threshold": 0.85,
-  "mmr_lambda": 0.7
+  "token_budget": 512
 }
 ```
+Docs at `http://localhost:8000/docs`.
 
----
+## What it actually does
+
+Five steps, all local:
+
+1. **Clean** — strips HTML, markdown headers, nav text, boilerplate
+2. **Score** — embeds every sentence and the query in one batch, drops sentences below the relevance threshold
+3. **Dedup** — finds near-identical sentences across chunks and removes them
+4. **MMR rerank** — reorders by relevance + diversity so you don't get 5 chunks all saying the same thing
+5. **Pack** — greedily fills the token budget with the best sentences, restores original reading order
+
+Steps 3 and 4 reuse the embeddings from step 2, so there's only one model call per run.
 
 ## Settings
 
-| Parameter | Default | Effect |
+| | default | what it does |
 |---|---|---|
-| `token_budget` | `2048` | Max tokens in output. Lower = more compression. Raise if output cuts off useful content. |
-| `relevance_threshold` | `0.25` | Min cosine similarity for a sentence to survive step 2. `0.15` = loose, `0.4` = strict. |
-| `dedup_threshold` | `0.85` | Similarity above which two sentences are considered duplicates. `0.95` = only exact matches, `0.7` = aggressive. |
-| `mmr_lambda` | `0.7` | `1.0` = rank purely by relevance. `0.5` = balance relevance with covering different subtopics. |
+| `token_budget` | 2048 | hard cap on output tokens |
+| `relevance_threshold` | 0.25 | how similar a sentence needs to be to the query to survive — raise it to get stricter filtering |
+| `dedup_threshold` | 0.85 | how similar two sentences need to be to count as duplicates — lower it to be more aggressive |
+| `mmr_lambda` | 0.7 | 1.0 = pure relevance ranking, 0.0 = pure diversity, 0.7 is a good middle ground |
 
----
-
-## Architecture
+## Code structure
 
 ```
 contextlite/
-├── cleaner.py     # Regex-based boilerplate removal (HTML, markdown, nav text)
-├── embedder.py    # sentence-transformers wrapper — all-MiniLM-L6-v2, cached singleton
-├── scorer.py      # Sentence splitting + single-batch embedding + relevance scoring
-│                  # Stores embedding on each ScoredSentence for downstream reuse
-├── deduper.py     # Cross-chunk dedup using stored embeddings (no model call)
-├── mmr.py         # MMR reranking using stored embeddings + query_vec (no model call)
-├── packer.py      # Greedy token budget packing via tiktoken; restores reading order
-└── pipeline.py    # Orchestrates all 5 steps; single public function: optimize()
-app.py             # Streamlit UI — model cached with @st.cache_resource,
-│                  # results cached with @st.cache_data (identical inputs = instant)
-main.py            # CLI entrypoint
-api.py             # FastAPI server
+├── cleaner.py    # regex boilerplate removal
+├── embedder.py   # sentence-transformers wrapper, cached singleton
+├── scorer.py     # splits sentences, embeds everything in one batch, scores against query
+├── deduper.py    # cross-chunk dedup using embeddings stored in scorer
+├── mmr.py        # MMR reranking using same stored embeddings
+├── packer.py     # token budget packing with tiktoken
+└── pipeline.py   # puts it all together, one function: optimize()
+app.py            # Streamlit UI
+main.py           # CLI
+api.py            # FastAPI
 ```
 
-**Key design decisions:**
-- Embeddings are computed once in `scorer.py` and stored on `ScoredSentence.embedding`. This means `deduper.py` and `mmr.py` do zero model calls — they reuse what scorer already computed.
-- The Streamlit model cache (`@st.cache_resource`) means the 80MB model loads once per server lifetime, not once per request.
-- `@st.cache_data` on `run_optimize` means repeated clicks with the same inputs return instantly.
+The embeddings are computed once in `scorer.py` and stored on each sentence object. `deduper.py` and `mmr.py` just read those — no extra model calls. The Streamlit app caches the model on startup and caches results, so repeated runs with the same input are instant.
 
----
-
-## Requirements
-
-- Python 3.11+
-- ~80MB disk for embedding model (downloaded on first run via HuggingFace)
-- No GPU needed — CPU inference is fast enough for typical RAG chunk sizes
-- No API keys
-
-```
-sentence-transformers  # local embeddings (all-MiniLM-L6-v2)
-tiktoken               # accurate token counting
-numpy <2.0             # pinned to avoid binary incompatibility with system pandas/sklearn
-fastapi + uvicorn      # API server
-streamlit              # UI
-```
+Requires Python 3.11+, no GPU needed.
