@@ -32,7 +32,7 @@ def print_result(result: dict, verbose: bool = False):
         print("-" * 60)
         print("WHAT HAPPENED:")
         for line in result["explanation"]:
-            print(f"  • {line}")
+            print(f"  - {line}")
     if verbose and result["removed_sentences"]:
         print("-" * 60)
         print("REMOVED SENTENCES:")
