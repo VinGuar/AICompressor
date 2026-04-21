@@ -113,6 +113,57 @@ Swagger docs at `http://localhost:8000/docs`.
 
 ---
 
+## Use as a library
+
+Install directly from the repo:
+
+```bash
+pip install git+https://github.com/VinGuar/AICompressor.git
+```
+
+Or clone and install locally:
+
+```bash
+git clone https://github.com/VinGuar/AICompressor.git
+cd AICompressor
+pip install -e .
+```
+
+Then drop it into any Python program:
+
+```python
+from contextlite import optimize
+
+chunks = [
+    "Our pricing starts at $499/month for the Starter plan...",
+    "The Starter plan includes 1,000 API requests per minute...",
+]
+
+result = optimize(chunks=chunks, query="What are the pricing plans?")
+
+print(result["optimized_context"])   # the compressed text, ready to send to the LLM
+print(result["compression_ratio"])   # e.g. 0.548 = 54.8% reduction
+print(result["token_estimate_before"])
+print(result["token_estimate_after"])
+```
+
+`optimize()` takes the same parameters as the CLI and API:
+
+```python
+optimize(
+    chunks,
+    query,
+    token_budget=2048,
+    relevance_threshold=0.25,
+    dedup_threshold=0.85,
+    mmr_lambda=0.7,
+)
+```
+
+No UI required. No API keys. Works in any Python 3.11+ environment.
+
+---
+
 ## Use cases
 
 - RAG pipelines over large document sets
@@ -152,3 +203,11 @@ api.py            # FastAPI
 Embeddings are computed once in `scorer.py` and attached to each sentence object. `deduper.py` and `mmr.py` read those directly, no extra model calls. The Streamlit app caches the model on startup so repeated runs with the same input are instant.
 
 Requires Python 3.11+, no GPU needed.
+
+---
+
+## License
+
+MIT License - Copyright (c) 2026 Vincent Guarnieri.
+
+Free to use and modify. If you use ContextLite in a project or product, attribution is required - keep the copyright notice intact and credit the original author. See [LICENSE](LICENSE) for the full terms.
