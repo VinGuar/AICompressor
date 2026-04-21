@@ -1,12 +1,28 @@
 # ContextLite
 
-RAG retrieves chunks. The problem is it retrieves whole chunks — even if only 2 sentences in a chunk are relevant, all 10 go into your prompt. And if 3 different chunks say the same thing, all 3 go in. By the time it hits the LLM you're paying for a lot of noise.
+```
+Input (RAG output):   4,800 tokens
+Output (ContextLite): 1,400 tokens
+Reduction:            71%
+LLM answer quality:   unchanged
+```
 
-ContextLite sits between your retrieval step and the LLM call. It takes the chunks you already retrieved, strips out the irrelevant sentences, removes duplicates across chunks, reranks for diversity, and packs everything into a token budget. No LLM calls — runs locally with a small embedding model.
+---
+
+RAG retrieves relevant chunks — but it still sends redundant, verbose, and overlapping text to the model. You get 8 chunks where 3 say the same thing, half the sentences in each chunk are irrelevant to the actual query, and none of it fits cleanly into your token budget. You end up paying for noise and getting worse reasoning.
+
+ContextLite sits between your retrieval step and the LLM call. It takes what RAG returned, strips it down to only the sentences that matter, removes duplicates across chunks, reranks for coverage, and packs the best content into whatever token budget you set. No LLM calls — runs locally.
 
 ```
-RAG chunks → ContextLite → clean context → LLM
+[your data] → [RAG retrieval] → [ContextLite] → [LLM]
+                                      ↑
+                       cleans, deduplicates, reranks,
+                       fits your token budget
 ```
+
+This is not RAG. RAG decides what to retrieve. ContextLite decides how to clean and pack what was retrieved — a layer that doesn't exist anywhere in LangChain or LlamaIndex.
+
+---
 
 ## Getting started
 
@@ -17,68 +33,78 @@ pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-First run downloads the embedding model (~80MB, cached after). No API keys needed.
+Downloads the embedding model (~80MB) on first run, cached after. No API keys.
 
-## How to use it
+---
 
-**UI** — `python -m streamlit run app.py`
+## Usage
 
-Paste your chunks, enter your query, hit Optimize. Shows before/after token counts, what was kept vs removed, and a side-by-side comparison.
+**UI** — paste your chunks, enter a query, see the results with before/after token counts and a breakdown of what was removed and why.
 
 **CLI**
 ```bash
 python main.py --chunks "chunk one" "chunk two" --query "your question"
-python main.py --demo   # try with built-in example data
+python main.py --demo
 python main.py --file chunks.txt --query "your question" --budget 1024
 ```
 
-**API** — `uvicorn api:app --reload`, then `POST /optimize`
+**API**
+```bash
+uvicorn api:app --reload
+```
 ```json
+POST /optimize
 {
-  "chunks": ["chunk one...", "chunk two..."],
+  "chunks": ["..."],
   "query": "What are the pricing plans?",
   "token_budget": 512
 }
 ```
-Docs at `http://localhost:8000/docs`.
+Swagger docs at `http://localhost:8000/docs`.
 
-## What it actually does
+---
 
-Five steps, all local:
+## How it works
 
-1. **Clean** — strips HTML, markdown headers, nav text, boilerplate
-2. **Score** — embeds every sentence and the query in one batch, drops sentences below the relevance threshold
-3. **Dedup** — finds near-identical sentences across chunks and removes them
-4. **MMR rerank** — reorders by relevance + diversity so you don't get 5 chunks all saying the same thing
-5. **Pack** — greedily fills the token budget with the best sentences, restores original reading order
+Five steps, all local, single embedding pass:
 
-Steps 3 and 4 reuse the embeddings from step 2, so there's only one model call per run.
+1. **Clean** — strip HTML, markdown headers, nav text, boilerplate
+2. **Score** — embed every sentence and the query together in one batch, drop anything below the relevance threshold
+3. **Dedup** — find near-identical sentences across chunks, keep the highest-scoring one
+4. **MMR rerank** — reorder by relevance + diversity so you don't end up with 5 sentences all saying the same thing
+5. **Pack** — fill the token budget greedily with the best sentences, restore reading order
+
+Steps 3 and 4 reuse embeddings from step 2 — there's one model call total per run.
+
+---
 
 ## Settings
 
-| | default | what it does |
+| | default | |
 |---|---|---|
 | `token_budget` | 2048 | hard cap on output tokens |
-| `relevance_threshold` | 0.25 | how similar a sentence needs to be to the query to survive — raise it to get stricter filtering |
-| `dedup_threshold` | 0.85 | how similar two sentences need to be to count as duplicates — lower it to be more aggressive |
-| `mmr_lambda` | 0.7 | 1.0 = pure relevance ranking, 0.0 = pure diversity, 0.7 is a good middle ground |
+| `relevance_threshold` | 0.25 | raise for stricter filtering, lower to keep more |
+| `dedup_threshold` | 0.85 | cosine similarity above which sentences are considered duplicates |
+| `mmr_lambda` | 0.7 | 1.0 = pure relevance, 0.0 = pure diversity |
 
-## Code structure
+---
+
+## Code
 
 ```
 contextlite/
 ├── cleaner.py    # regex boilerplate removal
 ├── embedder.py   # sentence-transformers wrapper, cached singleton
-├── scorer.py     # splits sentences, embeds everything in one batch, scores against query
-├── deduper.py    # cross-chunk dedup using embeddings stored in scorer
-├── mmr.py        # MMR reranking using same stored embeddings
+├── scorer.py     # sentence splitting + single-batch embed + relevance scoring
+├── deduper.py    # cross-chunk dedup using embeddings from scorer
+├── mmr.py        # MMR reranking using same embeddings
 ├── packer.py     # token budget packing with tiktoken
-└── pipeline.py   # puts it all together, one function: optimize()
+└── pipeline.py   # orchestrates all steps, one function: optimize()
 app.py            # Streamlit UI
 main.py           # CLI
 api.py            # FastAPI
 ```
 
-The embeddings are computed once in `scorer.py` and stored on each sentence object. `deduper.py` and `mmr.py` just read those — no extra model calls. The Streamlit app caches the model on startup and caches results, so repeated runs with the same input are instant.
+Embeddings are computed once in `scorer.py` and stored on each sentence object. `deduper.py` and `mmr.py` read those directly — no extra model calls. The Streamlit app caches the model on startup so the first optimize is fast and repeated runs with the same input are instant.
 
 Requires Python 3.11+, no GPU needed.
