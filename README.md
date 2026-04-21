@@ -202,7 +202,7 @@ api.py            # FastAPI
 
 Embeddings are computed once in `scorer.py` and attached to each sentence object. `deduper.py` and `mmr.py` read those directly, no extra model calls. The Streamlit app caches the model on startup so repeated runs with the same input are instant.
 
-Requires Python 3.11+, no GPU needed.
+Requires Python 3.11+. No GPU needed.
 
 ---
 
